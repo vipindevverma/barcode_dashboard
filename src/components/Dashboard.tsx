@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import BarcodeLabel, {
   ElementId,
   LabelConfig,
@@ -68,6 +68,10 @@ function clone<T>(value: T): T {
 
 type ViewMode = "editor" | "sheet";
 
+type Template = { id: string; name: string; config: LabelConfig };
+
+const TEMPLATES_KEY = "barcode-dashboard-templates";
+
 export default function Dashboard() {
   const [labels, setLabels] = useState<LabelConfig[]>([blankLabel()]);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -76,9 +80,27 @@ export default function Dashboard() {
   const [sheet, setSheet] = useState<SheetConfig>(defaultSheet);
   const [busy, setBusy] = useState<null | "png" | "pdf" | "sheet-pdf">(null);
   const [selectedId, setSelectedId] = useState<ElementId | null>(null);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [tplName, setTplName] = useState("");
+  const [tplLoaded, setTplLoaded] = useState(false);
 
   const labelRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(TEMPLATES_KEY);
+      if (raw) setTemplates(JSON.parse(raw));
+    } catch {}
+    setTplLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!tplLoaded) return;
+    try {
+      window.localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates));
+    } catch {}
+  }, [templates, tplLoaded]);
 
   const activeLabel = labels[activeIndex] ?? labels[0];
 
@@ -178,6 +200,37 @@ export default function Dashboard() {
     setLabels((ls) => ls.filter((_, idx) => idx !== i));
     setActiveIndex((j) => Math.max(0, j > i ? j - 1 : j === i ? Math.min(j, labels.length - 2) : j));
     setSelectedId(null);
+  };
+
+  const saveTemplate = () => {
+    const name = tplName.trim() || `Template ${templates.length + 1}`;
+    setTemplates((ts) => [
+      ...ts,
+      { id: uid(), name, config: clone(activeLabel) },
+    ]);
+    setTplName("");
+  };
+
+  const reIdTexts = (cfg: LabelConfig): LabelConfig => ({
+    ...cfg,
+    texts: cfg.texts.map((t) => ({ ...t, id: uid() })),
+  });
+
+  const applyTemplate = (tpl: Template) => {
+    const cfg = reIdTexts(clone(tpl.config));
+    setLabels((ls) => ls.map((l, i) => (i === activeIndex ? cfg : l)));
+    setSelectedId(null);
+  };
+
+  const newFromTemplate = (tpl: Template) => {
+    const cfg = reIdTexts(clone(tpl.config));
+    setLabels((ls) => [...ls, cfg]);
+    setActiveIndex(labels.length);
+    setSelectedId(null);
+  };
+
+  const deleteTemplate = (id: string) => {
+    setTemplates((ts) => ts.filter((t) => t.id !== id));
   };
 
   const filename = (activeLabel.barcode.value || "barcode-label")
@@ -355,6 +408,67 @@ export default function Dashboard() {
       {view === "editor" ? (
         <main className="flex-1 grid grid-cols-1 lg:grid-cols-[460px_1fr] gap-6 p-6">
           <section className="space-y-6 bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-5">
+            <Group title="Templates">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Save the current label&apos;s layout to reuse later. Saved
+                locally in your browser.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Template name"
+                  value={tplName}
+                  onChange={(e) => setTplName(e.target.value)}
+                  className={`${inputCls} flex-1`}
+                />
+                <button
+                  type="button"
+                  onClick={saveTemplate}
+                  className="h-9 px-3 rounded-md bg-zinc-900 text-white text-sm font-medium hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                >
+                  Save
+                </button>
+              </div>
+              {templates.length > 0 && (
+                <div className="space-y-1">
+                  {templates.map((t) => (
+                    <div
+                      key={t.id}
+                      className="flex items-center gap-2 rounded-md border border-zinc-200 dark:border-zinc-800 px-2 h-9"
+                    >
+                      <span className="flex-1 text-sm truncate text-zinc-700 dark:text-zinc-300">
+                        {t.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => applyTemplate(t)}
+                        title="Replace current label with this template"
+                        className="h-7 px-2 text-xs rounded-md border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => newFromTemplate(t)}
+                        title="Create a new label from this template"
+                        className="h-7 px-2 text-xs rounded-md border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      >
+                        New
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteTemplate(t.id)}
+                        title="Delete template"
+                        className="h-7 w-7 text-xs text-zinc-500 hover:text-red-600"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Group>
+
             <Group title="Barcode">
               <Field label="Value (Code 128)">
                 <input
