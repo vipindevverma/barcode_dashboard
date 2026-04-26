@@ -1,7 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
-import BarcodeLabel, { ExtraField, LabelConfig } from "./BarcodeLabel";
+import BarcodeLabel, {
+  ElementId,
+  LabelConfig,
+  Position,
+  TextEntry,
+  TextStyle,
+} from "./BarcodeLabel";
+import SheetPanel, { SheetConfig } from "./SheetPanel";
+import DimInput, { Unit, formatDim } from "./DimInput";
 import { exportPdf, exportPng } from "@/lib/exporters";
 
 const PRESETS: { name: string; widthMm: number; heightMm: number }[] = [
@@ -11,63 +19,208 @@ const PRESETS: { name: string; widthMm: number; heightMm: number }[] = [
   { name: "Shipping (100×150 mm)", widthMm: 100, heightMm: 150 },
 ];
 
-const initialConfig: LabelConfig = {
-  value: "ABC-12345",
-  title: "Product Name",
-  subtitle: "SKU: ABC-12345",
-  extras: [],
-  widthMm: 70,
-  heightMm: 40,
-  showValue: true,
-  barHeight: 50,
-  fontSize: 12,
+const defaultStyle = (fontSize: number, bold = false): TextStyle => ({
+  fontSize,
+  bold,
+  italic: false,
+});
+
+function blankLabel(suffix: string = "12345"): LabelConfig {
+  return {
+    widthMm: 70,
+    heightMm: 40,
+    barcode: {
+      value: `ABC-${suffix}`,
+      pos: { xPct: 50, yPct: 50 },
+      showValue: true,
+      valueStyle: defaultStyle(14),
+      barHeight: 50,
+      barWidth: 2,
+    },
+    title: {
+      text: "Product Name",
+      pos: { xPct: 50, yPct: 12 },
+      style: defaultStyle(14, true),
+    },
+    subtitle: {
+      text: `SKU: ABC-${suffix}`,
+      pos: { xPct: 50, yPct: 90 },
+      style: defaultStyle(11),
+    },
+    texts: [],
+  };
+}
+
+const defaultSheet: SheetConfig = {
+  paperWidthMm: 210,
+  paperHeightMm: 297,
+  marginMm: 10,
+  gapMm: 5,
 };
 
 function uid() {
   return Math.random().toString(36).slice(2, 9);
 }
 
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+type ViewMode = "editor" | "sheet";
+
 export default function Dashboard() {
-  const [config, setConfig] = useState<LabelConfig>(initialConfig);
-  const [busy, setBusy] = useState<null | "png" | "pdf">(null);
+  const [labels, setLabels] = useState<LabelConfig[]>([blankLabel()]);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [view, setView] = useState<ViewMode>("editor");
+  const [unit, setUnit] = useState<Unit>("mm");
+  const [sheet, setSheet] = useState<SheetConfig>(defaultSheet);
+  const [busy, setBusy] = useState<null | "png" | "pdf" | "sheet-pdf">(null);
+  const [selectedId, setSelectedId] = useState<ElementId | null>(null);
+
   const labelRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
 
-  const update = <K extends keyof LabelConfig>(key: K, value: LabelConfig[K]) =>
-    setConfig((c) => ({ ...c, [key]: value }));
+  const activeLabel = labels[activeIndex] ?? labels[0];
 
-  const addExtra = () =>
-    setConfig((c) => ({
-      ...c,
-      extras: [...c.extras, { id: uid(), label: "", value: "" }],
+  const updateActive = (updater: (l: LabelConfig) => LabelConfig) =>
+    setLabels((ls) =>
+      ls.map((l, i) => (i === activeIndex ? updater(l) : l)),
+    );
+
+  const updateBarcode = (patch: Partial<LabelConfig["barcode"]>) =>
+    updateActive((l) => ({ ...l, barcode: { ...l.barcode, ...patch } }));
+
+  const updateBarcodeValueStyle = (patch: Partial<TextStyle>) =>
+    updateActive((l) => ({
+      ...l,
+      barcode: {
+        ...l.barcode,
+        valueStyle: { ...l.barcode.valueStyle, ...patch },
+      },
     }));
 
-  const updateExtra = (id: string, patch: Partial<ExtraField>) =>
-    setConfig((c) => ({
-      ...c,
-      extras: c.extras.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+  const updateTitleField = (
+    key: "title" | "subtitle",
+    patch: Partial<LabelConfig["title"]>,
+  ) => updateActive((l) => ({ ...l, [key]: { ...l[key], ...patch } }));
+
+  const updateTitleStyle = (
+    key: "title" | "subtitle",
+    patch: Partial<TextStyle>,
+  ) =>
+    updateActive((l) => ({
+      ...l,
+      [key]: { ...l[key], style: { ...l[key].style, ...patch } },
     }));
 
-  const removeExtra = (id: string) =>
-    setConfig((c) => ({ ...c, extras: c.extras.filter((e) => e.id !== id) }));
+  const addText = () => {
+    const id = uid();
+    updateActive((l) => ({
+      ...l,
+      texts: [
+        ...l.texts,
+        {
+          id,
+          text: "New text",
+          pos: { xPct: 50, yPct: 50 },
+          style: defaultStyle(11),
+        },
+      ],
+    }));
+    setSelectedId(id);
+  };
 
-  const filename = (config.value || "barcode-label")
+  const updateText = (id: string, patch: Partial<TextEntry>) =>
+    updateActive((l) => ({
+      ...l,
+      texts: l.texts.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+    }));
+
+  const updateTextStyle = (id: string, patch: Partial<TextStyle>) =>
+    updateActive((l) => ({
+      ...l,
+      texts: l.texts.map((t) =>
+        t.id === id ? { ...t, style: { ...t.style, ...patch } } : t,
+      ),
+    }));
+
+  const removeText = (id: string) => {
+    updateActive((l) => ({ ...l, texts: l.texts.filter((t) => t.id !== id) }));
+    if (selectedId === id) setSelectedId(null);
+  };
+
+  const handleMove = (id: ElementId, xPct: number, yPct: number) => {
+    const pos: Position = { xPct, yPct };
+    if (id === "barcode") updateBarcode({ pos });
+    else if (id === "title") updateTitleField("title", { pos });
+    else if (id === "subtitle") updateTitleField("subtitle", { pos });
+    else updateText(id, { pos });
+  };
+
+  const addLabel = () => {
+    setLabels((ls) => [...ls, blankLabel(String(ls.length + 1).padStart(5, "0"))]);
+    setActiveIndex(labels.length);
+    setSelectedId(null);
+  };
+
+  const duplicateLabel = (i: number) => {
+    setLabels((ls) => {
+      const copy = clone(ls[i]);
+      copy.texts = copy.texts.map((t) => ({ ...t, id: uid() }));
+      return [...ls.slice(0, i + 1), copy, ...ls.slice(i + 1)];
+    });
+    setActiveIndex(i + 1);
+    setSelectedId(null);
+  };
+
+  const removeLabel = (i: number) => {
+    if (labels.length <= 1) return;
+    setLabels((ls) => ls.filter((_, idx) => idx !== i));
+    setActiveIndex((j) => Math.max(0, j > i ? j - 1 : j === i ? Math.min(j, labels.length - 2) : j));
+    setSelectedId(null);
+  };
+
+  const filename = (activeLabel.barcode.value || "barcode-label")
     .replace(/[^a-z0-9-_]+/gi, "_")
     .slice(0, 40);
 
   const handleExport = async (kind: "png" | "pdf") => {
     if (!labelRef.current) return;
+    const prevSelected = selectedId;
+    setSelectedId(null);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
     setBusy(kind);
     try {
       if (kind === "png") {
-        await exportPng(labelRef.current, config.widthMm, filename);
+        await exportPng(labelRef.current, activeLabel.widthMm, filename);
       } else {
         await exportPdf(
           labelRef.current,
-          config.widthMm,
-          config.heightMm,
+          activeLabel.widthMm,
+          activeLabel.heightMm,
           filename,
         );
       }
+    } finally {
+      setBusy(null);
+      setSelectedId(prevSelected);
+    }
+  };
+
+  const handleSheetPrint = () => {
+    window.print();
+  };
+
+  const handleSheetPdf = async () => {
+    if (!sheetRef.current) return;
+    setBusy("sheet-pdf");
+    try {
+      await exportPdf(
+        sheetRef.current,
+        sheet.paperWidthMm,
+        sheet.paperHeightMm,
+        "label-sheet",
+      );
     } finally {
       setBusy(null);
     }
@@ -75,202 +228,385 @@ export default function Dashboard() {
 
   return (
     <div className="flex flex-col flex-1 w-full">
-      <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-6 py-4">
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">
-          Barcode Label Generator
-        </h1>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Code 128 · Live preview · Export as PNG or PDF
-        </p>
+      <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-6 py-4 flex items-center justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">
+            Barcode Label Generator
+          </h1>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            Code 128 · Multi-label · A4 sheet · Print or export
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="inline-flex rounded-md border border-zinc-300 dark:border-zinc-700 overflow-hidden text-sm">
+            <button
+              type="button"
+              onClick={() => setUnit("mm")}
+              className={`px-3 h-9 ${
+                unit === "mm"
+                  ? "bg-zinc-900 text-white dark:bg-zinc-50 dark:text-zinc-900"
+                  : "bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              mm
+            </button>
+            <button
+              type="button"
+              onClick={() => setUnit("in")}
+              className={`px-3 h-9 border-l border-zinc-300 dark:border-zinc-700 ${
+                unit === "in"
+                  ? "bg-zinc-900 text-white dark:bg-zinc-50 dark:text-zinc-900"
+                  : "bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              in
+            </button>
+          </div>
+          <div className="inline-flex rounded-md border border-zinc-300 dark:border-zinc-700 overflow-hidden text-sm">
+            <button
+              type="button"
+              onClick={() => setView("editor")}
+              className={`px-4 h-9 ${
+                view === "editor"
+                  ? "bg-zinc-900 text-white dark:bg-zinc-50 dark:text-zinc-900"
+                  : "bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("sheet")}
+              className={`px-4 h-9 border-l border-zinc-300 dark:border-zinc-700 ${
+                view === "sheet"
+                  ? "bg-zinc-900 text-white dark:bg-zinc-50 dark:text-zinc-900"
+                  : "bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              Sheet
+            </button>
+          </div>
+        </div>
       </header>
 
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[400px_1fr] gap-6 p-6">
-        <section className="space-y-6 bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-5">
-          <Group title="Barcode">
-            <Field label="Value (Code 128)">
-              <input
-                type="text"
-                value={config.value}
-                onChange={(e) => update("value", e.target.value)}
-                className={inputCls}
-                placeholder="e.g. ABC-12345"
-              />
-            </Field>
-            <Toggle
-              label="Show value text below bars"
-              checked={config.showValue}
-              onChange={(v) => update("showValue", v)}
-            />
-          </Group>
-
-          <Group title="Text">
-            <Field label="Title (top)">
-              <input
-                type="text"
-                value={config.title}
-                onChange={(e) => update("title", e.target.value)}
-                className={inputCls}
-              />
-            </Field>
-            <Field label="Subtitle (bottom)">
-              <input
-                type="text"
-                value={config.subtitle}
-                onChange={(e) => update("subtitle", e.target.value)}
-                className={inputCls}
-              />
-            </Field>
-          </Group>
-
-          <Group title="Extra fields">
-            <div className="space-y-2">
-              {config.extras.map((extra) => (
-                <div key={extra.id} className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="Label"
-                    value={extra.label}
-                    onChange={(e) =>
-                      updateExtra(extra.id, { label: e.target.value })
-                    }
-                    className={`${inputCls} w-1/3`}
-                  />
-                  <input
-                    type="text"
-                    placeholder="Value"
-                    value={extra.value}
-                    onChange={(e) =>
-                      updateExtra(extra.id, { value: e.target.value })
-                    }
-                    className={`${inputCls} flex-1`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeExtra(extra.id)}
-                    className="px-2 text-zinc-500 hover:text-red-600"
-                    aria-label="Remove field"
+      {view === "editor" && (
+        <div className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-6 py-2 flex items-center gap-2 overflow-x-auto">
+          {labels.map((label, i) => {
+            const active = i === activeIndex;
+            return (
+              <div key={i} className="flex items-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveIndex(i);
+                    setSelectedId(null);
+                  }}
+                  className={`pl-3 pr-2 h-8 rounded-l-md border flex items-center gap-2 text-sm whitespace-nowrap ${
+                    active
+                      ? "bg-zinc-900 text-white border-zinc-900 dark:bg-zinc-50 dark:text-zinc-900 dark:border-zinc-50"
+                      : "bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  <span>Label {i + 1}</span>
+                  <span
+                    className={`text-xs ${active ? "opacity-80" : "text-zinc-500 dark:text-zinc-400"}`}
                   >
-                    ✕
-                  </button>
-                </div>
-              ))}
+                    {label.barcode.value || "—"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => duplicateLabel(i)}
+                  title="Duplicate"
+                  className={`h-8 px-2 border-y text-xs ${
+                    active
+                      ? "bg-zinc-900 text-white border-zinc-900 dark:bg-zinc-50 dark:text-zinc-900 dark:border-zinc-50"
+                      : "bg-white dark:bg-zinc-900 text-zinc-500 border-zinc-300 dark:border-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100"
+                  }`}
+                >
+                  ⎘
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeLabel(i)}
+                  disabled={labels.length <= 1}
+                  title="Remove"
+                  className={`h-8 px-2 rounded-r-md border text-xs disabled:opacity-30 ${
+                    active
+                      ? "bg-zinc-900 text-white border-zinc-900 dark:bg-zinc-50 dark:text-zinc-900 dark:border-zinc-50"
+                      : "bg-white dark:bg-zinc-900 text-zinc-500 border-zinc-300 dark:border-zinc-700 hover:text-red-600"
+                  }`}
+                >
+                  ✕
+                </button>
+              </div>
+            );
+          })}
+          <button
+            type="button"
+            onClick={addLabel}
+            className="h-8 px-3 rounded-md border border-dashed border-zinc-300 dark:border-zinc-700 text-sm text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          >
+            + New label
+          </button>
+        </div>
+      )}
+
+      {view === "editor" ? (
+        <main className="flex-1 grid grid-cols-1 lg:grid-cols-[460px_1fr] gap-6 p-6">
+          <section className="space-y-6 bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-5">
+            <Group title="Barcode">
+              <Field label="Value (Code 128)">
+                <input
+                  type="text"
+                  value={activeLabel.barcode.value}
+                  onChange={(e) => updateBarcode({ value: e.target.value })}
+                  onFocus={() => setSelectedId("barcode")}
+                  className={inputCls}
+                  placeholder="e.g. ABC-12345"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Bar height">
+                  <input
+                    type="number"
+                    min={20}
+                    max={200}
+                    value={activeLabel.barcode.barHeight}
+                    onChange={(e) =>
+                      updateBarcode({
+                        barHeight: Number(e.target.value) || 0,
+                      })
+                    }
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="Bar width">
+                  <input
+                    type="number"
+                    min={1}
+                    max={6}
+                    step={0.5}
+                    value={activeLabel.barcode.barWidth}
+                    onChange={(e) =>
+                      updateBarcode({
+                        barWidth: Number(e.target.value) || 0,
+                      })
+                    }
+                    className={inputCls}
+                  />
+                </Field>
+              </div>
+              <Toggle
+                label="Show value text below bars"
+                checked={activeLabel.barcode.showValue}
+                onChange={(v) => updateBarcode({ showValue: v })}
+              />
+              {activeLabel.barcode.showValue && (
+                <StyleControls
+                  style={activeLabel.barcode.valueStyle}
+                  onChange={updateBarcodeValueStyle}
+                />
+              )}
+              <PositionRow pos={activeLabel.barcode.pos} />
+            </Group>
+
+            <Group title="Title">
+              <input
+                type="text"
+                value={activeLabel.title.text}
+                onChange={(e) =>
+                  updateTitleField("title", { text: e.target.value })
+                }
+                onFocus={() => setSelectedId("title")}
+                className={inputCls}
+              />
+              <StyleControls
+                style={activeLabel.title.style}
+                onChange={(patch) => updateTitleStyle("title", patch)}
+              />
+              <PositionRow pos={activeLabel.title.pos} />
+            </Group>
+
+            <Group title="Subtitle">
+              <input
+                type="text"
+                value={activeLabel.subtitle.text}
+                onChange={(e) =>
+                  updateTitleField("subtitle", { text: e.target.value })
+                }
+                onFocus={() => setSelectedId("subtitle")}
+                className={inputCls}
+              />
+              <StyleControls
+                style={activeLabel.subtitle.style}
+                onChange={(patch) => updateTitleStyle("subtitle", patch)}
+              />
+              <PositionRow pos={activeLabel.subtitle.pos} />
+            </Group>
+
+            <Group title="Custom text">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Add text and drag it anywhere on the label.
+              </p>
+              <div className="space-y-3">
+                {activeLabel.texts.map((entry) => {
+                  const selected = selectedId === entry.id;
+                  return (
+                    <div
+                      key={entry.id}
+                      onClick={() => setSelectedId(entry.id)}
+                      className={`space-y-2 rounded-md border p-2 cursor-pointer ${
+                        selected
+                          ? "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20"
+                          : "border-zinc-200 dark:border-zinc-800"
+                      }`}
+                    >
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          placeholder="Text"
+                          value={entry.text}
+                          onChange={(e) =>
+                            updateText(entry.id, { text: e.target.value })
+                          }
+                          className={`${inputCls} flex-1`}
+                        />
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeText(entry.id);
+                          }}
+                          className="px-2 text-zinc-500 hover:text-red-600"
+                          aria-label="Remove text"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <StyleControls
+                        style={entry.style}
+                        onChange={(patch) => updateTextStyle(entry.id, patch)}
+                      />
+                      <PositionRow pos={entry.pos} />
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={addText}
+                  className="text-sm font-medium text-blue-600 hover:text-blue-700"
+                >
+                  + Add text
+                </button>
+              </div>
+            </Group>
+
+            <Group title="Label size">
+              <Field label="Preset">
+                <select
+                  className={inputCls}
+                  onChange={(e) => {
+                    const preset = PRESETS[Number(e.target.value)];
+                    if (preset) {
+                      updateActive((l) => ({
+                        ...l,
+                        widthMm: preset.widthMm,
+                        heightMm: preset.heightMm,
+                      }));
+                    }
+                  }}
+                  defaultValue=""
+                >
+                  <option value="" disabled>
+                    Choose a preset…
+                  </option>
+                  {PRESETS.map((p, i) => (
+                    <option key={p.name} value={i}>
+                      {p.name} ({formatDim(p.widthMm, unit)}×
+                      {formatDim(p.heightMm, unit)} {unit})
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label={`Width (${unit})`}>
+                  <DimInput
+                    valueMm={activeLabel.widthMm}
+                    onChangeMm={(mm) =>
+                      updateActive((l) => ({ ...l, widthMm: mm }))
+                    }
+                    unit={unit}
+                    minMm={10}
+                    maxMm={300}
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label={`Height (${unit})`}>
+                  <DimInput
+                    valueMm={activeLabel.heightMm}
+                    onChangeMm={(mm) =>
+                      updateActive((l) => ({ ...l, heightMm: mm }))
+                    }
+                    unit={unit}
+                    minMm={10}
+                    maxMm={300}
+                    className={inputCls}
+                  />
+                </Field>
+              </div>
+            </Group>
+
+            <div className="flex gap-3 pt-2">
               <button
                 type="button"
-                onClick={addExtra}
-                className="text-sm font-medium text-blue-600 hover:text-blue-700"
+                onClick={() => handleExport("png")}
+                disabled={busy !== null}
+                className="flex-1 h-10 rounded-md bg-zinc-900 text-white text-sm font-medium hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
               >
-                + Add field
+                {busy === "png" ? "Exporting…" : "Export PNG"}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExport("pdf")}
+                disabled={busy !== null}
+                className="flex-1 h-10 rounded-md border border-zinc-300 dark:border-zinc-700 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+              >
+                {busy === "pdf" ? "Exporting…" : "Export PDF"}
               </button>
             </div>
-          </Group>
+          </section>
 
-          <Group title="Label size">
-            <Field label="Preset">
-              <select
-                className={inputCls}
-                onChange={(e) => {
-                  const preset = PRESETS[Number(e.target.value)];
-                  if (preset) {
-                    update("widthMm", preset.widthMm);
-                    update("heightMm", preset.heightMm);
-                  }
-                }}
-                defaultValue=""
-              >
-                <option value="" disabled>
-                  Choose a preset…
-                </option>
-                {PRESETS.map((p, i) => (
-                  <option key={p.name} value={i}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Width (mm)">
-                <input
-                  type="number"
-                  min={10}
-                  max={300}
-                  value={config.widthMm}
-                  onChange={(e) =>
-                    update("widthMm", Number(e.target.value) || 0)
-                  }
-                  className={inputCls}
-                />
-              </Field>
-              <Field label="Height (mm)">
-                <input
-                  type="number"
-                  min={10}
-                  max={300}
-                  value={config.heightMm}
-                  onChange={(e) =>
-                    update("heightMm", Number(e.target.value) || 0)
-                  }
-                  className={inputCls}
-                />
-              </Field>
-              <Field label="Bar height">
-                <input
-                  type="number"
-                  min={20}
-                  max={200}
-                  value={config.barHeight}
-                  onChange={(e) =>
-                    update("barHeight", Number(e.target.value) || 0)
-                  }
-                  className={inputCls}
-                />
-              </Field>
-              <Field label="Font size">
-                <input
-                  type="number"
-                  min={8}
-                  max={32}
-                  value={config.fontSize}
-                  onChange={(e) =>
-                    update("fontSize", Number(e.target.value) || 0)
-                  }
-                  className={inputCls}
-                />
-              </Field>
+          <section className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-5 flex flex-col">
+            <div className="text-sm font-medium text-zinc-500 dark:text-zinc-400 mb-4">
+              Preview · Label {activeIndex + 1}
             </div>
-          </Group>
-
-          <div className="flex gap-3 pt-2">
-            <button
-              type="button"
-              onClick={() => handleExport("png")}
-              disabled={busy !== null}
-              className="flex-1 h-10 rounded-md bg-zinc-900 text-white text-sm font-medium hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
-            >
-              {busy === "png" ? "Exporting…" : "Export PNG"}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleExport("pdf")}
-              disabled={busy !== null}
-              className="flex-1 h-10 rounded-md border border-zinc-300 dark:border-zinc-700 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
-            >
-              {busy === "pdf" ? "Exporting…" : "Export PDF"}
-            </button>
-          </div>
-        </section>
-
-        <section className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-800 p-5 flex flex-col">
-          <div className="text-sm font-medium text-zinc-500 dark:text-zinc-400 mb-4">
-            Preview
-          </div>
-          <div className="flex-1 flex items-center justify-center bg-zinc-100 dark:bg-zinc-950 rounded-md p-6 overflow-auto">
-            <BarcodeLabel ref={labelRef} config={config} />
-          </div>
-          <p className="text-xs text-zinc-400 mt-3">
-            Exports render at 300 DPI for sharp printing.
-          </p>
-        </section>
-      </main>
+            <div className="flex-1 flex items-center justify-center bg-zinc-100 dark:bg-zinc-950 rounded-md p-6 overflow-auto">
+              <BarcodeLabel
+                ref={labelRef}
+                config={activeLabel}
+                onMove={handleMove}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+              />
+            </div>
+            <p className="text-xs text-zinc-400 mt-3">
+              Drag any element to reposition · Single-label exports render at 300 DPI.
+            </p>
+          </section>
+        </main>
+      ) : (
+        <SheetPanel
+          ref={sheetRef}
+          labels={labels}
+          sheet={sheet}
+          setSheet={(updater) => setSheet((s) => updater(s))}
+          onPrint={handleSheetPrint}
+          onExportPdf={handleSheetPdf}
+          busy={busy === "sheet-pdf"}
+          unit={unit}
+        />
+      )}
     </div>
   );
 }
@@ -329,5 +665,85 @@ function Toggle({
       />
       {label}
     </label>
+  );
+}
+
+function PositionRow({ pos }: { pos: Position }) {
+  return (
+    <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+      Position: {pos.xPct.toFixed(1)}%, {pos.yPct.toFixed(1)}% — drag on
+      preview to move
+    </div>
+  );
+}
+
+function StyleControls({
+  style,
+  onChange,
+}: {
+  style: TextStyle;
+  onChange: (patch: Partial<TextStyle>) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+        <span>Size</span>
+        <input
+          type="number"
+          min={6}
+          max={48}
+          value={style.fontSize}
+          onChange={(e) =>
+            onChange({ fontSize: Number(e.target.value) || 0 })
+          }
+          className="h-8 w-16 px-2 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-sm"
+        />
+      </label>
+      <StyleToggleButton
+        active={style.bold}
+        onClick={() => onChange({ bold: !style.bold })}
+        label="B"
+        bold
+      />
+      <StyleToggleButton
+        active={style.italic}
+        onClick={() => onChange({ italic: !style.italic })}
+        label="I"
+        italic
+      />
+    </div>
+  );
+}
+
+function StyleToggleButton({
+  active,
+  onClick,
+  label,
+  bold,
+  italic,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  bold?: boolean;
+  italic?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`h-8 w-8 rounded-md border text-sm transition-colors ${
+        active
+          ? "bg-zinc-900 text-white border-zinc-900 dark:bg-zinc-50 dark:text-zinc-900 dark:border-zinc-50"
+          : "border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+      }`}
+      style={{
+        fontWeight: bold ? 700 : 400,
+        fontStyle: italic ? "italic" : "normal",
+      }}
+    >
+      {label}
+    </button>
   );
 }

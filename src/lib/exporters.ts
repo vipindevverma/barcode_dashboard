@@ -1,17 +1,17 @@
-import html2canvas from "html2canvas";
+import { toPng } from "html-to-image";
 import jsPDF from "jspdf";
 
 const MM_PER_INCH = 25.4;
 const EXPORT_DPI = 300;
 
-async function renderCanvas(node: HTMLElement, widthMm: number) {
+async function renderPngDataUrl(node: HTMLElement, widthMm: number) {
   const widthInches = widthMm / MM_PER_INCH;
   const targetPx = widthInches * EXPORT_DPI;
-  const scale = targetPx / node.offsetWidth;
-  return html2canvas(node, {
-    scale,
+  const pixelRatio = Math.max(1, targetPx / node.offsetWidth);
+  return toPng(node, {
+    pixelRatio,
     backgroundColor: "#ffffff",
-    useCORS: true,
+    cacheBust: true,
   });
 }
 
@@ -20,8 +20,7 @@ export async function exportPng(
   widthMm: number,
   filename: string,
 ) {
-  const canvas = await renderCanvas(node, widthMm);
-  const dataUrl = canvas.toDataURL("image/png");
+  const dataUrl = await renderPngDataUrl(node, widthMm);
   triggerDownload(dataUrl, `${filename}.png`);
 }
 
@@ -31,8 +30,7 @@ export async function exportPdf(
   heightMm: number,
   filename: string,
 ) {
-  const canvas = await renderCanvas(node, widthMm);
-  const dataUrl = canvas.toDataURL("image/png");
+  const dataUrl = await renderPngDataUrl(node, widthMm);
   const pdf = new jsPDF({
     unit: "mm",
     format: [widthMm, heightMm],
